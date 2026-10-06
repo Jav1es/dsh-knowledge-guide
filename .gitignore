@@ -1,0 +1,19 @@
+# 凭据与本地配置（本仓库不含任何凭据，此处为兜底）
+.env
+.env.*
+*.credentials.yaml
+.credentials.yaml
+*.token
+
+# 归档与临时文件
+*.zip
+*.tar.gz
+*.tmp
+*.bak
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
