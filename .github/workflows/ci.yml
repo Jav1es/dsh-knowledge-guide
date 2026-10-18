@@ -1,0 +1,134 @@
+name: CI
+
+# 这些仓库是「纯 Markdown 技能包」：没有代码可跑，但 SKILL.md 的
+# frontmatter 是对外契约 —— name 必须是 kebab-case、description 必填，
+# 否则装进任何宿主都会**静默失效**（文件还在，工具却报 unknown）。
+# 本机就踩过这个坑（2026-10-04 dsh-token-guardian 因缺 name/description
+# 长期未被装载，而目录里看不到任何诊断）。
+#
+# 所以 CI 做三件事：
+#   1. 校验每个 SKILL.md 的 frontmatter 契约
+#   2. 校验 README 里引用的相对链接没有死链
+#   3. 敏感信息扫描
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: 技能包契约
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+
+      - name: SKILL.md frontmatter 校验
+        run: |
+          node <<'NODE'
+          const fs = require('fs');
+          const path = require('path');
+
+          function walk(dir, out = []) {
+            for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+              if (e.name === '.git' || e.name === 'node_modules') continue;
+              const p = path.join(dir, e.name);
+              if (e.isDirectory()) walk(p, out);
+              else if (e.name === 'SKILL.md') out.push(p);
+            }
+            return out;
+          }
+
+          const files = walk('.');
+          if (files.length === 0) {
+            // 有些仓库（如 workbuddy-bridge）只是文档 + 示例配置，不含技能包。
+            // 这种情况不算失败，但明确说出来，避免「绿了但其实什么都没查」。
+            console.log('::notice::本仓库不含 SKILL.md，跳过 frontmatter 校验');
+            process.exit(0);
+          }
+
+          const NAME_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+          let bad = 0;
+
+          for (const f of files) {
+            const text = fs.readFileSync(f, 'utf8');
+            const m = text.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n/);
+            if (!m) {
+              console.log(`::error file=${f}::缺少 frontmatter（文件必须以 --- 开头）`);
+              bad++; continue;
+            }
+            const fm = m[1];
+            const name = (fm.match(/^name:\s*(.+)$/m) || [])[1];
+            const desc = (fm.match(/^description:\s*(.+)$/m) || [])[1];
+
+            const problems = [];
+            if (!name) problems.push('缺 name');
+            else if (!NAME_RE.test(name.trim())) problems.push(`name 不是 kebab-case: ${name.trim()}`);
+            if (!desc || !desc.trim()) problems.push('缺 description');
+
+            if (problems.length) {
+              console.log(`::error file=${f}::${problems.join('; ')}`);
+              bad++;
+            } else {
+              console.log(`✅ ${f} → ${name.trim()}`);
+            }
+          }
+
+          if (bad) process.exit(1);
+          NODE
+
+      - name: README 相对链接死链检查
+        run: |
+          node <<'NODE'
+          const fs = require('fs');
+          const path = require('path');
+
+          const readmes = fs.readdirSync('.').filter(f => /^README.*\.md$/i.test(f));
+          if (readmes.length === 0) {
+            console.log('没有 README，跳过');
+            process.exit(0);
+          }
+
+          let bad = 0;
+          for (const r of readmes) {
+            const text = fs.readFileSync(r, 'utf8');
+            // 只查 [文字](目标) 形式，且目标不是 http(s)/mailto/锚点
+            const re = /\[[^\]]*\]\(([^)\s]+)\)/g;
+            let m;
+            while ((m = re.exec(text)) !== null) {
+              const target = m[1].split('#')[0];
+              if (!target) continue;
+              if (/^(https?:|mailto:|tel:)/i.test(target)) continue;
+              const resolved = path.resolve(path.dirname(r), target);
+              if (!fs.existsSync(resolved)) {
+                console.log(`::error file=${r}::死链 ${target}`);
+                bad++;
+              }
+            }
+            console.log(`✅ ${r} 链接检查完成`);
+          }
+          if (bad) process.exit(1);
+          NODE
+
+      - name: 敏感信息扫描
+        run: |
+          hits=$(grep -rInE 'C:\\Users\\|/Users/[A-Za-z0-9_.-]+/|D:\\Jav1e|ghp_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9]{20,}' \
+                 --exclude-dir=.git . || true)
+          if [ -n "$hits" ]; then
+            echo "::error::发现疑似本机路径或凭据"
+            echo "$hits"
+            exit 1
+          fi
+          echo "✅ 未发现本机路径或凭据"
